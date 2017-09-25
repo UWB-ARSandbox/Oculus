@@ -22,7 +22,6 @@ limitations under the License.
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
 using UnityEngine;
 using VR = UnityEngine.VR;
 
@@ -78,6 +77,14 @@ public class OVRCameraRig : MonoBehaviour
 	/// </summary>
 	public bool usePerEyeCameras = false;
 
+	/// <summary>
+	/// If true, all tracked anchors are updated in FixedUpdate instead of Update to favor physics fidelity.
+	/// \note: If the fixed update rate doesn't match the rendering framerate (OVRManager.display.appFramerate), the anchors will visibly judder.
+	/// </summary>
+	public bool useFixedUpdateForTracking = false;
+
+	private bool _skipUpdate = false;
+
 	private readonly string trackingSpaceName = "TrackingSpace";
 	private readonly string trackerAnchorName = "TrackerAnchor";
 	private readonly string eyeAnchorName = "EyeAnchor";
@@ -87,57 +94,50 @@ public class OVRCameraRig : MonoBehaviour
 	private Camera _leftEyeCamera;
 	private Camera _rightEyeCamera;
 
-#if UNITY_ANDROID && !UNITY_EDITOR
-    bool correctedTrackingSpace = false;
-#endif
-
 #region Unity Messages
 	private void Awake()
 	{
+		_skipUpdate = true;
 		EnsureGameObjectIntegrity();
 	}
 
 	private void Start()
 	{
-		EnsureGameObjectIntegrity();
-
-		if (!Application.isPlaying)
-			return;
-
 		UpdateAnchors();
+	}
+
+	private void FixedUpdate()
+	{
+		if (useFixedUpdateForTracking)
+			UpdateAnchors();
 	}
 
 	private void Update()
 	{
-		EnsureGameObjectIntegrity();
-		
-		if (!Application.isPlaying)
-			return;
+		_skipUpdate = false;
 
-		UpdateAnchors();
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-
-        if (!correctedTrackingSpace)
-        {
-            //HACK: Unity 5.1.1p3 double-counts the head model on Android. Subtract it off in the reference frame.
-
-            var headModel = new Vector3(0f, OVRManager.profile.eyeHeight - OVRManager.profile.neckHeight, OVRManager.profile.eyeDepth);
-            var eyePos = -headModel + centerEyeAnchor.localRotation * headModel;
-
-            if ((eyePos - centerEyeAnchor.localPosition).magnitude > 0.01f)
-            {
-                trackingSpace.localPosition = trackingSpace.localPosition - 2f * (trackingSpace.localRotation * headModel);
-                correctedTrackingSpace = true;
-            }
-        }
-#endif
+		if (!useFixedUpdateForTracking)
+			UpdateAnchors();
 	}
 
 #endregion
 
 	private void UpdateAnchors()
 	{
+		EnsureGameObjectIntegrity();
+
+		if (!Application.isPlaying)
+			return;
+		
+		if (_skipUpdate)
+		{
+			centerEyeAnchor.FromOVRPose(OVRPose.identity, true);
+			leftEyeAnchor.FromOVRPose(OVRPose.identity, true);
+			rightEyeAnchor.FromOVRPose(OVRPose.identity, true);
+
+			return;
+		}
+
 		bool monoscopic = OVRManager.instance.monoscopic;
 
 		OVRPose tracker = OVRManager.tracker.GetPose();
@@ -226,6 +226,13 @@ public class OVRCameraRig : MonoBehaviour
 #endif
 		}
 
+		if (_centerEyeCamera.enabled == usePerEyeCameras ||
+		    _leftEyeCamera.enabled == !usePerEyeCameras ||
+		    _rightEyeCamera.enabled == !usePerEyeCameras)
+		{
+			_skipUpdate = true;
+		}
+		
 		_centerEyeCamera.enabled = !usePerEyeCameras;
 		_leftEyeCamera.enabled = usePerEyeCameras;
 		_rightEyeCamera.enabled = usePerEyeCameras;
@@ -321,4 +328,27 @@ public class OVRCameraRig : MonoBehaviour
 
 		return anchor;
 	}
+
+	public Matrix4x4 ComputeTrackReferenceMatrix()
+	{
+		if (centerEyeAnchor == null)
+		{
+			Debug.LogError("centerEyeAnchor is required");
+			return Matrix4x4.identity;
+		}
+
+		// The ideal approach would be using UnityEngine.VR.VRNode.TrackingReference, then we would not have to depend on the OVRCameraRig. Unfortunately, it is not available in Unity 5.4.3
+
+		OVRPose headPose;
+		headPose.position = UnityEngine.VR.InputTracking.GetLocalPosition(UnityEngine.VR.VRNode.Head);
+		headPose.orientation = UnityEngine.VR.InputTracking.GetLocalRotation(UnityEngine.VR.VRNode.Head);
+
+		OVRPose invHeadPose = headPose.Inverse();
+		Matrix4x4 invHeadMatrix = Matrix4x4.TRS(invHeadPose.position, invHeadPose.orientation, Vector3.one);
+
+		Matrix4x4 ret = centerEyeAnchor.localToWorldMatrix * invHeadMatrix;
+
+		return ret;
+	}
+
 }
